@@ -5,14 +5,17 @@ const querystring = require("querystring");
 const url = require("url");
 
 //Yuzu主体
+//TODO: 只在Yuzu类中暴露服务性方法,核心实现封装成一个类,并且在Yuzu类中实例化并挂载
 class Yuzu {
+    //TODO: 默认属性,待完善
+    static options = {};
     //初始化方法,内部方法
-    //TODO: 这里的初始化方法均可以用类封装
+    //TODO: 这里的初始化方法均可以用类封装,可以封装一个叫Cores的类,控制核心
     _init() {
         //构造服务器引擎实例,并在listen方法中绑定事件
         this._server = http.createServer();
 
-        //构造路由管理
+        //构造路由器
         this._router = new Router();
 
         //构造默认错误代理
@@ -28,20 +31,23 @@ class Yuzu {
     constructor(options) {
         //载入配置信息
         //这个要判断是否有传入options参数
-        //TODO: 如果没有传入，就使用默认的配置,默认配置待完善
         if (!options) {
+            this.config = Yuzu.options;
+        } else {
+            this.config = options;
         }
-        this.config = options;
+
         //初始化操作
         this._init();
     }
 
+    //注册中间件,接收一个中间件函数
     middleWare(...mws) {
-        //注册全局中间件
+        //注册全局中间件,把传来的中间件函数全部封装成中间件对象
         this._middleWareProxy.add(mws);
     }
 
-    //RESTFUL API的实现
+    //RESTFUL API的实现,对外直接暴露,方便使用
     get(url, handler, ...mws) {
         //注册get路由
         this._router._routeProxy.register(url, "GET", handler, mws);
@@ -60,7 +66,12 @@ class Yuzu {
     }
     any(url, method, handler, ...mws) {
         //注册自定义路由
-        this._router._routeProxy.register(url, method, handler, mws);
+        this._router._routeProxy.register(
+            url,
+            method.toUpperCase(),
+            handler,
+            mws
+        );
     }
     //未能找到资源,定义失败的路由
     fail(handler) {
@@ -76,7 +87,7 @@ class Yuzu {
         this._errorProxy.errorHandle = errHandle;
     }
 
-    //注册路由器
+    //注册路由器:路由合并
     router(...routers) {
         //合并主引擎的路由器和传入的路由器
         routers.forEach((router) => {
@@ -92,13 +103,11 @@ class Yuzu {
     }
 
     //监听并且进行一些初始化操作
-    listen(port) {
+    run(port) {
         //绑定请求事件的处理方法
         this._server.on("request", (req, res) => {
-            //为res添加一些便捷方法
-            this._connectionProxy.addResponseMethods(res);
-            this._connectionProxy.parseQueryString(req);
-            this._connectionProxy.parseBody(req);
+            //代理请求和响应(包含初始化等操作)
+            this._connectionProxy.proxy(req, res);
             //主逻辑链
             try {
                 //启动中间件调用链,依次执行所有注册的中间件
@@ -182,12 +191,37 @@ class AutoStaticRoute {
 }
 
 //连接代理,用于处理res和req,相当于一个中间件合集
+//TODO: 可以把默认中间件抽取成一个类,然后在这里实例化;这样也方便在导出的时候根据传入的配置信息进行选择性构造
 class ConnectionProxy {
     constructor(options) {
         this.config = options;
     }
+
+    //代理响应
+    #proxyResponse(res) {
+        MiddleWare.AddResponseMethods(res);
+    }
+
+    //代理请求
+    #proxyRequest(req) {
+        MiddleWare.ParseBody(req);
+        MiddleWare.ParseQueryString(req);
+    }
+
+    //代理请求和响应
+    proxy(req, res) {
+        this.#proxyRequest(req);
+        this.#proxyResponse(res);
+    }
+}
+
+//中间件基类:包含一些静态的默认中间件
+class MiddleWare {
+    //TODO: 解析表单数据
+    static ParseBody(req) {}
+
     //为res添加一些便捷方法
-    addResponseMethods(res) {
+    static AddResponseMethods(res) {
         function readAndSet(filePath, typ) {
             //拼接当前路径
             filePath = path.join(__dirname, filePath);
@@ -199,11 +233,12 @@ class ConnectionProxy {
             });
         }
 
-        //添加便捷方法
+        //读取html文件发送
         res.html = (filePath) => {
             readAndSet(filePath, "text/html");
         };
 
+        //读取json文件发送
         res.json = (filePath) => {
             readAndSet(filePath, "application/json");
         };
@@ -214,12 +249,20 @@ class ConnectionProxy {
             res.end(JSON.stringify(json));
         };
 
+        //发送文本
+        res.text = (content) => {
+            res.writeHead(200, { "Content-Type": "text/plain" });
+            res.end(data);
+        };
+
+        //直接根据读取的文件类型发送
         res.send = (filePath, fileType) => {
             readAndSet(filePath, fileType);
         };
     }
+
     //解析query参数
-    parseQueryString(req) {
+    static ParseQueryString(req) {
         const urlArray = req.url.split("?");
         if (urlArray.length === 1) return; //说明没有携带query参数
         //剥离query参数使路由可以正常解析
@@ -229,14 +272,42 @@ class ConnectionProxy {
         const query = querystring.parse(urlQuery);
         req.query = query;
     }
-    //TODO: 解析表单数据
-    parseBody(req) {
-        if (req.method.toUpperCase() != "POST") return; //判断是否为post方法
+
+    //打包中间件,返回中间件对象数组
+    static pack(mws) {
+        return mws.map((mw) => new MiddleWare(mw));
+    }
+
+    constructor(mw) {
+        this.middleWare = mw;
+    }
+    //中间件的执行方法
+    do(req, res, next, context) {
+        this.middleWare(req, res, next, context);
     }
 }
 
 //中间件代理
 class MiddleWareProxy {
+    //轮转执行中间件
+    static roundNext(req, res, context, queue) {
+        //定义一个指针,指向当前中间件
+        let index = 0;
+        //定义一个next方法,用于启动下一个中间件
+        const next = () => {
+            //如果中间件链已经执行完毕,就返回
+            if (index >= queue.length) return;
+            //获取当前中间件
+            const currentMw = queue[index];
+            //指针后移
+            index++;
+            //启动当前中间件
+            currentMw.do(req, res, next, context);
+        };
+        //启动中间件链
+        next();
+    }
+
     constructor(options) {
         //设置原型为yuzu实例
         this.config = options;
@@ -247,21 +318,25 @@ class MiddleWareProxy {
     }
     //顺序执行中间件队列
     carry(req, res) {
-        this.queue.forEach((middleWare) => {
-            middleWare(req, res, this.Context);
-        });
+        //启动中间件链
+        MiddleWareProxy.roundNext(req, res, this.context, this.queue);
     }
     //向中间件队列添加中间件
     add(mws) {
+        //包装成对象数组
+        mws = MiddleWare.pack(mws);
+        //遍历添加中间件
         mws.forEach((middleWare) => {
             this.queue.push(middleWare);
         });
     }
 }
 
-//路由代理
+//路由代理:路由器的内核
 class RouteProxy {
     constructor(frontUrl) {
+        if (!frontUrl) frontUrl = ""; //默认根前缀
+
         // this.config = options;
         this.frontUrl = frontUrl;
         this.routerMap = new Map();
@@ -271,6 +346,9 @@ class RouteProxy {
         //封装路由对象
         //加前缀
         url = this.frontUrl + url;
+        //封装中间件对象
+        middleWares = MiddleWare.pack(middleWares);
+
         const route = {
             url,
             method,
@@ -290,14 +368,13 @@ class RouteProxy {
         const key = `${req.method} ${req.url}`;
         //解构出路由函数和中间件
         const route = this.routerMap.get(key);
+
         if (!route) return this.fail(req, res); //路由不存在,执行路由匹配失败的处理函数Fail()
 
         const { handler, middleWares } = route;
-        //执行中间件,构造临时闭包上下文
+        //执行中间件,构造临时闭包中间件上下文
         const tempContext = {};
-        middleWares.forEach((middleWare) => {
-            middleWare(req, res, tempContext);
-        });
+        MiddleWareProxy.roundNext(req, res, tempContext, middleWares);
         //执行路由处理函数
         handler(req, res);
     }
@@ -322,9 +399,10 @@ class ErrorProxy {
     }
 }
 
-//路由器:对路由代理的封装
+//路由器:对路由代理的封装,具有一个内部类RouteProxy
 class Router {
     constructor(frontUrl) {
+        if (!frontUrl) frontUrl = ""; //默认前缀为根路径
         // this.config = options;
         //路由代理
         this._routeProxy = new RouteProxy(frontUrl);
@@ -362,18 +440,19 @@ class Router {
     }
 }
 
-//YUZU函数,返回Yuzu对象
-function YUZU(options) {
-    return new Yuzu(options);
+//对构造函数YUZU的封装
+//TODO: 可以选择把导出操作封装成一个类???
+{
+    //YUZU构造函数,返回Yuzu对象
+    function YUZU(options) {
+        return new Yuzu(options);
+    }
+
+    //创建路由器,可以依赖前缀.
+    YUZU.Router = (frontUrl) => {
+        return new Router(frontUrl);
+    };
 }
 
-//创建路由器,可以依赖前缀
-YUZU.Router = (frontUrl) => {
-    if (!frontUrl) {
-        return new Router("");
-    }
-    return new Router(frontUrl);
-};
-
-//导出构造函数
+//导出构造函数YUZU
 module.exports = YUZU;
