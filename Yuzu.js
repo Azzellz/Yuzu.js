@@ -123,8 +123,26 @@ class Yuzu {
             }
         });
 
-        //启动服务器
-        this._server.listen(port);
+        //默认监听端口80
+        if (!port) {
+            port = 80;
+        }
+
+        try {
+            //启动服务器
+            this._server.listen(port, () => {
+                console.log(`yuzu listen on port : ${port}`);
+            });
+        } catch (error) {
+            console.error(error);
+        }
+
+        //监听退出事件:自动关闭服务器
+        process.on("exit", (code) => {
+            this._server.close(() => {
+                console.log("Server is closed");
+            });
+        });
     }
 }
 
@@ -208,10 +226,18 @@ class ConnectionProxy {
         MiddleWare.ParseQueryString(req);
     }
 
+    //代理日志中间件
+    #proxyLog(req, res) {
+        MiddleWare.Log(req, res);
+    }
+
     //代理请求和响应
     proxy(req, res) {
+        //记录请求开始时间
+        req.startTime = Date.now();
         this.#proxyRequest(req);
         this.#proxyResponse(res);
+        this.#proxyLog(req, res);
     }
 }
 
@@ -252,7 +278,7 @@ class MiddleWare {
         //发送文本
         res.text = (content) => {
             res.writeHead(200, { "Content-Type": "text/plain" });
-            res.end(data);
+            res.end(content);
         };
 
         //直接根据读取的文件类型发送
@@ -273,7 +299,22 @@ class MiddleWare {
         req.query = query;
     }
 
-    //打包中间件,返回中间件对象数组
+    //TODO: 默认日志中间件:应该包含错误和响应结束
+    static Log(req, res) {
+        req.on("end", () => {
+            console.log(
+                `the request : ${req.method} ${req.url} --> timeout: ${
+                    Date.now() - req.startTime
+                }ms`
+            );
+        });
+
+        req.on("error", (error) => {
+            console.error("Error occurred:", error);
+        });
+    }
+
+    //打包中间件,返回中间件对象数组,mws应该为中间件对象
     static pack(mws) {
         return mws.map((mw) => new MiddleWare(mw));
     }
@@ -344,8 +385,15 @@ class RouteProxy {
     //注册路由
     register(url, method, handler, middleWares) {
         //封装路由对象
+
         //加前缀
+        //斜杆判断,如果传入的参数没有斜杆,要补上一个斜杆。
+        if (url[0] != "/") {
+            //补上斜杆
+            url = "/" + url;
+        }
         url = this.frontUrl + url;
+
         //封装中间件对象
         middleWares = MiddleWare.pack(middleWares);
 
