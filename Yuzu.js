@@ -102,6 +102,16 @@ class Yuzu {
         this._static = new AutoStaticRoute(dstPath);
     }
 
+    //根据传入的相对路径写入一条HTMLLibrary映射
+    HTML(htmlName, filePath) {
+        this._connectionProxy._htmlProxy.writeOneRecord(htmlName, filePath);
+    }
+
+    //根据传入的相对路径写入一整个目录的HTML文件映射,以html文件名作为key
+    HTMLS(dirname) {
+        this._connectionProxy._htmlProxy.writeAllDir(dirname);
+    }
+
     //监听并且进行一些初始化操作
     run(port) {
         //绑定请求事件的处理方法
@@ -209,10 +219,21 @@ class AutoStaticRoute {
 }
 
 //连接代理,用于处理res和req,相当于一个中间件合集
-//TODO: 可以把默认中间件抽取成一个类,然后在这里实例化;这样也方便在导出的时候根据传入的配置信息进行选择性构造
+//TODO: 凡是要用到res，req的功能都放这里
 class ConnectionProxy {
     constructor(options) {
         this.config = options;
+
+        //TODO:构建html代理
+        this._htmlProxy = new HTMLProxy();
+    }
+
+    //预处理
+    #preProxy(req, res) {
+        //记录请求开始时间
+        req.startTime = Date.now();
+        //挂载htmlProxy
+        res._htmlProxy = this._htmlProxy;
     }
 
     //代理响应
@@ -233,24 +254,30 @@ class ConnectionProxy {
 
     //代理请求和响应
     proxy(req, res) {
-        //记录请求开始时间
-        req.startTime = Date.now();
+        this.#preProxy(req, res);
+
         this.#proxyRequest(req);
+
         this.#proxyResponse(res);
+
         this.#proxyLog(req, res);
     }
 }
 
 //中间件基类:包含一些静态的默认中间件
 class MiddleWare {
-    //TODO: 解析表单数据
+    //TODO: 解析表单数据的中间件
     static ParseBody(req) {}
 
     //为res添加一些便捷方法
     static AddResponseMethods(res) {
-        function readAndSet(filePath, typ) {
-            //拼接当前路径
-            filePath = path.join(__dirname, filePath);
+        //注意,这个方法的filePath参数应该为相对路径
+        function readAndSet(filePath, typ, isAbsolute) {
+            //判断是否是相对路径,若是则拼接当前路径
+            if (!isAbsolute) {
+                filePath = path.join(__dirname, filePath);
+            }
+
             //异步一把梭哈
             fs.readFile(filePath, "utf-8", (err, data) => {
                 if (err) return console.error(err);
@@ -262,6 +289,14 @@ class MiddleWare {
         //读取html文件发送
         res.html = (filePath) => {
             readAndSet(filePath, "text/html");
+        };
+
+        //根据存档的html文件名发送
+        res.HTML = (htmlName) => {
+            //TODO: 获取res中挂载的htmlLibrary
+            const filePath = res._htmlProxy.get(htmlName);
+            //根据绝对路径读取
+            readAndSet(filePath, "text/html", true);
         };
 
         //读取json文件发送
@@ -299,7 +334,7 @@ class MiddleWare {
         req.query = query;
     }
 
-    //TODO: 默认日志中间件:应该包含错误和响应结束
+    //TODO: 默认日志中间件:应该包含错误和响应计时.
     static Log(req, res) {
         req.on("end", () => {
             console.log(
@@ -380,6 +415,7 @@ class RouteProxy {
 
         // this.config = options;
         this.frontUrl = frontUrl;
+        //创建路由表
         this.routerMap = new Map();
     }
     //注册路由
@@ -485,6 +521,72 @@ class Router {
                 ...router._routeProxy.routerMap,
             ]);
         });
+    }
+}
+
+//HTML存档库,用于更加方便地发送html文件
+class HTMLProxy {
+    constructor(option) {
+        this.option = option;
+        //创建html表
+        this.htmlMap = new Map();
+    }
+    //判断是否为HTML文件
+    static isHTML(filePath) {
+        return path.extname(filePath) == ".html";
+    }
+    //注册html文档
+    register(htmlName, filePath) {
+        //写入map,要求必须是绝对路径
+        this.htmlMap.set(htmlName, filePath);
+    }
+    //获取html文档的本地文件路径
+    get(htmlName) {
+        return this.htmlMap.get(htmlName);
+    }
+    //写入一条HTML映射
+    writeOneRecord(htmlName, filePath) {
+        filePath = path.join(__dirname, filePath);
+        this.register(htmlName, filePath);
+    }
+    //写入一整个目录的HTML映射
+    writeAllDir(dirname) {
+        //来个闭包
+        const htmlProxy = this;
+        //计数器
+        var count = 0;
+
+        //TODO: 这里可以输出一下注册了哪些html,这里需要Promise化才能更好地输出日志
+        function traverseDirectory(dirPath) {
+            // 读取目录中的文件和文件夹
+            fs.readdir(dirPath, { withFileTypes: true }, (err, files) => {
+                if (err) {
+                    console.error(err);
+                    return;
+                }
+
+                // 遍历文件和文件夹
+                files.forEach((file) => {
+                    const filePath = path.join(dirPath, file.name);
+                    // 如果是html文件
+                    if (file.isFile() && HTMLProxy.isHTML(filePath)) {
+                        //计数加一
+                        count++;
+                        //打印日志
+                        console.log(`${count}: ${filePath} has been loaded`);
+                        htmlProxy.register(file.name, filePath);
+                    }
+                    // 如果是目录，则递归遍历目录
+                    else if (file.isDirectory()) {
+                        traverseDirectory(filePath);
+                    }
+                });
+            });
+        }
+        
+        //这里要求传入的dirname必须是相对路径
+        const dirPath = path.join(__dirname, dirname);
+        traverseDirectory(dirPath);
     }
 }
 
